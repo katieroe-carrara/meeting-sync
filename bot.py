@@ -21,6 +21,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 sys.path.insert(0, str(Path(__file__).parent))
 from meeting_sync import (
     load_config,
+    sync_meetings,
     find_todays_meetings,
     extract_action_items_from_file,
     DEFAULT_CONFIG_PATH,
@@ -108,7 +109,11 @@ def build_no_items_blocks():
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def get_todays_items():
-    """Extract today's action items from Obsidian vault."""
+    """Sync new meetings from Granola, then extract today's action items."""
+    # Run sync first to pull any new meetings from Granola cache
+    synced_files = sync_meetings(cfg)
+
+    # Then find ALL of today's files (synced now + previously synced)
     today_files = find_todays_meetings(cfg)
     results = []
     for file_path in today_files:

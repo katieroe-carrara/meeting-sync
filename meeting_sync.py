@@ -40,6 +40,9 @@ ACTION_KEYWORDS = [
     "will review", "will follow up", "will set up", "will prepare",
     "need to", "needs to", "should", "must", "deadline", "target:",
     "by end of", "by next", "action:", "todo:", "owner:",
+    "sending ", "waiting for", "planning ", "scheduled ",
+    "discussing", "identified", "next step", "priorities",
+    "proceed", "feedback", "target ", "interview",
 ]
 
 
@@ -270,6 +273,11 @@ def extract_new_meetings(granola_state, sync_state):
     else:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
 
+    # Always sync anything from today, even if created_at < last_sync.
+    # Granola's cache can lag behind, so meetings may appear after last_sync
+    # has already moved past their created_at.
+    today_prefix = datetime.now().strftime("%Y-%m-%d")
+
     # Build folder lookup
     folder_lookup = {}
     for list_id, list_data in granola_state.get("documentLists", {}).items():
@@ -288,7 +296,8 @@ def extract_new_meetings(granola_state, sync_state):
         if doc_id in known_ids:
             continue
         created = doc.get("created_at", "")
-        if created < cutoff:
+        is_today = created.startswith(today_prefix)
+        if not is_today and created < cutoff:
             continue
 
         # Build participants
