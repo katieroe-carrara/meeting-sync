@@ -10,6 +10,7 @@ Requires slack-bolt: pip install slack-bolt
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -35,8 +36,35 @@ app = None
 
 # ── Block Kit builders ────────────────────────────────────────────────────
 
+def split_katie_items(action_items_by_meeting):
+    """Separate Katie's action items from others across all meetings.
+
+    Items starting with (me) are Katie's (from transcript speaker tagging).
+    Items mentioning 'katie' by name are also hers.
+    """
+    katie_items = []
+    other_meetings = []
+
+    for meeting in action_items_by_meeting:
+        katie = []
+        other = []
+        for item in meeting["items"]:
+            if item.startswith("(me)") or re.search(r'\bkatie\b', item, re.IGNORECASE):
+                katie.append(item)
+            else:
+                other.append(item)
+        if katie:
+            katie_items.append({"title": meeting["title"], "items": katie})
+        if other:
+            other_meetings.append({"title": meeting["title"], "items": other})
+
+    return katie_items, other_meetings
+
+
 def build_interactive_blocks(action_items_by_meeting):
-    """Build Block Kit with checkboxes for each action item."""
+    """Build Block Kit with checkboxes, Katie's items shown first."""
+    katie_items, other_meetings = split_katie_items(action_items_by_meeting)
+
     blocks = [
         {
             "type": "header",
@@ -48,7 +76,26 @@ def build_interactive_blocks(action_items_by_meeting):
         {"type": "divider"},
     ]
 
-    for m_idx, meeting in enumerate(action_items_by_meeting):
+    # Combine: Katie's items first, then others
+    all_meetings = []
+    if katie_items:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*Your action items:*"},
+        })
+        for m in katie_items:
+            all_meetings.append(m)
+    if other_meetings:
+        if katie_items:
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Other action items:*"},
+            })
+        for m in other_meetings:
+            all_meetings.append(m)
+
+    for m_idx, meeting in enumerate(all_meetings):
         # Meeting title
         blocks.append({
             "type": "section",

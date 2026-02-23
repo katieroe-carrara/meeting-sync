@@ -32,18 +32,37 @@ ACTION_SECTION_PATTERNS = [
     r"assignments",
 ]
 
-ACTION_KEYWORDS = [
-    "to create", "to provide", "to send", "to schedule", "to review",
-    "to follow up", "to set up", "to prepare", "to share", "to update",
-    "to complete", "to finalize", "to confirm", "to coordinate",
-    "will send", "will create", "will provide", "will schedule",
-    "will review", "will follow up", "will set up", "will prepare",
-    "need to", "needs to", "should", "must", "deadline", "target:",
-    "by end of", "by next", "action:", "todo:", "owner:",
-    "sending ", "waiting for", "planning ", "scheduled ",
-    "discussing", "identified", "next step", "priorities",
-    "proceed", "feedback", "target ", "interview",
+# Patterns that signal real commitments/action items in transcript speech
+# Intentionally specific to reduce noise from conversational filler
+TRANSCRIPT_ACTION_PATTERNS = [
+    # "I'll [action verb]" — specific commitments
+    r"\bi'(?:ll|m going to|m gonna)\s+(?:send|email|share|follow up|reach out|schedule|set up|finalize|work on|handle|talk to|ping|create|draft|write|build|update|put together|coordinate|own that)",
+    # "We need to" / "I need to" — obligations
+    r"\bi need to\s+(?:send|email|share|follow up|reach out|schedule|set up|finalize|work on|handle|talk to|figure out|check|get|do|run|update)",
+    r"\bwe need to\s+(?:send|email|share|follow up|reach out|schedule|set up|finalize|work on|handle|figure out|check|get|do|rebalance|reduce|pick|redesign|negotiate)",
+    # Requests directed at someone
+    r"\bcan you\s+(?:send|email|share|follow up|reach out|schedule|set up|get us|check|do|create|draft|handle|research|put)",
+    # Deadlines
+    r"\bby (?:end of (?:day|week)|monday|tuesday|wednesday|thursday|friday|next week|tomorrow|tonight|eod|eow)\b",
+    # Explicit markers
+    r"\baction item\b",
+    r"\bnext step[s]?\s+(?:is|are|on|here|for)\b",
+    r"\bfollow[- ]?up (?:with|on)\b",
 ]
+TRANSCRIPT_ACTION_RE = re.compile("|".join(TRANSCRIPT_ACTION_PATTERNS), re.IGNORECASE)
+
+# Short filler and non-actionable speech to ignore
+FILLER_PATTERNS = re.compile(
+    r"^(?:yeah|yep|okay|ok|cool|right|sure|mhm|uh huh|great|alright|thanks|bye|hello|hi|hey|hmm|huh|wow|oh)[.\s!?,]*$",
+    re.IGNORECASE,
+)
+# Lines that match action patterns but aren't real action items
+NOISE_PATTERNS = re.compile(
+    r"\bi need to (?:run|go|hop|jump|leave|mute|drop)\b"
+    r"|\blet me (?:see|show|think|check|look|pull up|share my screen)\b"
+    r"|\bi'(?:ll|m going to|m gonna) (?:be |try |just )",
+    re.IGNORECASE,
+)
 
 
 # ── Configuration ─────────────────────────────────────────────────────────
@@ -291,7 +310,7 @@ def extract_new_meetings(granola_state, sync_state):
 
     new_meetings = []
     for doc_id, doc in granola_state.get("documents", {}).items():
-        if doc.get("deleted_at") or not doc.get("valid_meeting", True):
+        if doc.get("deleted_at") or doc.get("valid_meeting") is False:
             continue
         if doc_id in known_ids:
             continue
@@ -465,43 +484,66 @@ def sync_meetings(cfg):
 # ── Part B: Extract Action Items ──────────────────────────────────────────
 
 def extract_action_items_from_file(file_path):
-    """Parse a meeting file and extract action items from the Summary section."""
+    """Parse a meeting file and extract action items from the Transcript section."""
     content = file_path.read_text()
 
     title_match = re.search(r'^title:\s*"?([^"\n]+)"?', content, re.MULTILINE)
     title = title_match.group(1).strip() if title_match else file_path.stem
 
-    summary_match = re.search(r'## Summary\n+(.*?)(?=\n## |\Z)', content, re.DOTALL)
-    if not summary_match:
+    # Extract transcript section
+    transcript_match = re.search(r'## Transcript\n+(.*?)(?=\n## |\Z)', content, re.DOTALL)
+    if not transcript_match:
         return title, []
 
-    summary_text = summary_match.group(1).strip()
-    if summary_text == "No summary available.":
+    transcript_text = transcript_match.group(1).strip()
+    if transcript_text.startswith("Transcript not available"):
         return title, []
 
+    # Parse transcript lines: [timestamp] (speaker) text
+    lines = []
+    for m in re.finditer(
+        r'^\[([^\]]+)\]\s*\((\w+)\)\s*(.+)$', transcript_text, re.MULTILINE
+    ):
+        lines.append({"ts": m.group(1), "speaker": m.group(2), "text": m.group(3).strip()})
+
+    if not lines:
+        return title, []
+
+    # Scan for action-item patterns, grabbing context around matches
     action_items = []
+    seen = set()
 
-    # Strategy 1: Find action-oriented sections (Next Steps, Action Items, etc.)
-    section_pattern = r'###?\s*(?:' + '|'.join(ACTION_SECTION_PATTERNS) + r')\s*\n(.*?)(?=\n###?\s|\Z)'
-    section_matches = re.finditer(section_pattern, summary_text, re.IGNORECASE | re.DOTALL)
+    for idx, line in enumerate(lines):
+        text = line["text"]
 
-    for sm in section_matches:
-        section_content = sm.group(1).strip()
-        bullets = re.findall(r'^[-*]\s+(.+)$', section_content, re.MULTILINE)
-        for bullet in bullets:
-            cleaned = bullet.strip()
-            if cleaned and len(cleaned) > 5:
-                action_items.append(cleaned)
+        # Skip filler
+        if FILLER_PATTERNS.match(text):
+            continue
 
-    # Strategy 2: If no section matches, scan all bullets for action keywords
-    if not action_items:
-        all_bullets = re.findall(r'^[-*]\s+(.+)$', summary_text, re.MULTILINE)
-        for bullet in all_bullets:
-            bullet_lower = bullet.lower()
-            if any(kw in bullet_lower for kw in ACTION_KEYWORDS):
-                cleaned = bullet.strip()
-                if cleaned and len(cleaned) > 5:
-                    action_items.append(cleaned)
+        if TRANSCRIPT_ACTION_RE.search(text) and not NOISE_PATTERNS.search(text):
+            # Grab this line + up to 2 following lines for context
+            parts = [text]
+            for j in range(1, 3):
+                if idx + j < len(lines):
+                    next_text = lines[idx + j]["text"]
+                    if not FILLER_PATTERNS.match(next_text):
+                        parts.append(next_text)
+                    else:
+                        break
+
+            combined = " ".join(parts)
+            # Clean up and truncate
+            combined = re.sub(r'\s+', ' ', combined).strip()
+            if len(combined) > 200:
+                combined = combined[:200] + "..."
+
+            # Deduplicate similar items
+            dedup_key = combined[:60].lower()
+            if dedup_key not in seen and len(combined) > 10:
+                seen.add(dedup_key)
+                # Tag with speaker
+                speaker = line["speaker"]
+                action_items.append(f"({speaker}) {combined}")
 
     return title, action_items
 
