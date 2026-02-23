@@ -4,6 +4,7 @@
   "granola_cache": "~/Library/Application Support/Granola/cache-v3.json",
   "slack": {
     "bot_token": "xoxb-your-token-here",
+    "app_token": "xapp-your-app-token-here",
     "channel": "C0YOUR_CHANNEL"
   },
   "organization_domain": "yourcompany.com",
